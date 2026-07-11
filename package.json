@@ -1,0 +1,14 @@
+{
+  "name": "github-actions-clone",
+  "private": true,
+  "workspaces": [
+    "backend/server",
+    "backend/runner"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev --workspace=backend/server",
+    "dev:runner": "npm run dev --workspace=backend/runner",
+    "build:server": "npm run build --workspace=backend/server",
+    "build:runner": "npm run build --workspace=backend/runner"
+  }
+}
