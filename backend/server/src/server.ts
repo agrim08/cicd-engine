@@ -2,6 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import * as path from 'path';
+import swaggerJSDoc from 'swagger-jsdoc';
+import swaggerUi from 'swagger-ui-express';
 
 // Import environment configuration first to trigger Zod validation early
 import { env } from './config/env';
@@ -10,15 +12,58 @@ import { errorHandler, AppError } from './middleware/errors';
 
 const app = express();
 
+const swaggerOptions = {
+  definition: {
+    openapi: '3.0.0',
+    info: {
+      title: 'GitHub Actions Clone API',
+      version: '1.0.0',
+      description: 'API documentation for GitHub Actions Clone',
+    },
+  },
+  apis: [path.join(__dirname, '**/*.{ts,js}').replace(/\\/g, '/')],
+}
+
+const swaggerDocs = swaggerJSDoc(swaggerOptions)
+
 // Standard middleware for security and request parsing
 app.use(helmet());
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs))
 
 /**
- * @route GET /health
- * @desc Checks connectivity to database and general server health
+ * @openapi
+ * /health:
+ *   get:
+ *     summary: Check system health status
+ *     description: Returns the status of the server and database connectivity.
+ *     responses:
+ *       200:
+ *         description: Server is healthy and database is connected.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   example: ok
+ *                 timestamp:
+ *                   type: string
+ *                   example: 2026-07-12T15:03:10.000Z
+ *                 services:
+ *                   type: object
+ *                   properties:
+ *                     database:
+ *                       type: string
+ *                       example: connected
+ *                     server:
+ *                       type: string
+ *                       example: healthy
+ *       500:
+ *         description: Server database connection or other system services are unhealthy.
  */
 app.get('/health', async (req, res, next) => {
   try {

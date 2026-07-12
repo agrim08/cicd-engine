@@ -3,12 +3,7 @@ import * as path from 'path';
 import * as dotenv from 'dotenv';
 
 // Load environment variables from root directory to support running from workspaces
-const envPath = path.resolve(__dirname, '../../../../.env');
-const result = dotenv.config({ path: envPath });
-if (result.error) {
-  console.error('[DEBUG] dotenv load error:', result.error);
-}
-
+dotenv.config({ path: path.resolve(__dirname, '../../../../.env') });
 
 /**
  * Zod Schema for environment variable validation.

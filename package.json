@@ -10,5 +10,13 @@
     "dev:runner": "npm run dev --workspace=backend/runner",
     "build:server": "npm run build --workspace=backend/server",
     "build:runner": "npm run build --workspace=backend/runner"
+  },
+  "dependencies": {
+    "swagger-jsdoc": "^6.3.0",
+    "swagger-ui-express": "^5.0.1"
+  },
+  "devDependencies": {
+    "@types/swagger-jsdoc": "^6.0.4",
+    "@types/swagger-ui-express": "^4.1.8"
   }
 }
