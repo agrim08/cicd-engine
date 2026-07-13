@@ -3,6 +3,7 @@ import { z } from 'zod';
 import crypto from 'crypto';
 import { db } from '../storage/db';
 import { AppError } from '../middleware/errors';
+import { parseGitHubUrl, checkPipelineFileExists } from '../github/api';
 
 export const reposRouter = Router();
 
@@ -48,10 +49,34 @@ reposRouter.post('/', async (req, res, next) => {
 
     const { github_repo_url, github_token } = parseResult.data;
 
-    // Check if repository already exists
+    // Parse URL first to validate structure and get owner/repo
+    let owner: string;
+    let repo: string;
+    try {
+      const parsed = parseGitHubUrl(github_repo_url);
+      owner = parsed.owner;
+      repo = parsed.repo;
+    } catch (err: any) {
+      return next(new AppError(err.message, 400));
+    }
+
+    // Check if repository already exists in DB
     const existing = await db('repos').where({ github_repo_url }).first();
     if (existing) {
       return next(new AppError('Repository URL is already registered', 400));
+    }
+
+    // Perform onboarding check on GitHub
+    let hasPipeline = false;
+    try {
+      hasPipeline = await checkPipelineFileExists(owner, repo, github_token);
+    } catch (error: any) {
+      return next(
+        new AppError(
+          `Unable to access GitHub repository. Please check repository URL or access token. Details: ${error.message}`,
+          400
+        )
+      );
     }
 
     // Generate random 32-byte hex string (64 characters) for webhook HMAC validation
@@ -69,15 +94,21 @@ reposRouter.post('/', async (req, res, next) => {
     const host = req.get('host');
     const webhookUrl = `${protocol}://${host}/webhook/github`;
 
+    const responseData: any = {
+      id: newRepo.id,
+      github_repo_url: newRepo.github_repo_url,
+      webhook_url: webhookUrl,
+      webhook_secret: newRepo.webhook_secret,
+      created_at: newRepo.created_at,
+    };
+
+    if (!hasPipeline) {
+      responseData.warning = "Pipeline configuration file '.cicd/pipeline.yaml' not found in repository. Please create it to run workflows.";
+    }
+
     res.status(201).json({
       status: 'success',
-      data: {
-        id: newRepo.id,
-        github_repo_url: newRepo.github_repo_url,
-        webhook_url: webhookUrl,
-        webhook_secret: newRepo.webhook_secret,
-        created_at: newRepo.created_at,
-      },
+      data: responseData,
     });
   } catch (error) {
     next(error);

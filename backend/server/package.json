@@ -13,6 +13,7 @@
     "migrate:rollback": "knex migrate:rollback --knexfile src/storage/knexfile.ts"
   },
   "dependencies": {
+    "@octokit/rest": "^22.0.1",
     "bullmq": "^5.8.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",

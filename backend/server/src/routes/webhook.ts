@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { db } from '../storage/db';
 import { AppError } from '../middleware/errors';
+import { parseGitHubUrl, fetchPipelineYaml } from '../github/api';
 
 export const webhookRouter = Router();
 
@@ -110,11 +111,15 @@ webhookRouter.post('/github', async (req: Request, res: Response, next: NextFunc
 
     console.log(`🚀 Webhook validated. Event: ${eventType}, Repository: ${repoUrl}, Commit: ${sha}, Branch: ${branch}`);
 
-    // TODO: In Day 2, we will trigger YAML fetching and BullMQ enqueuing.
-    // For Day 1, we return 202 indicating the webhook has been accepted.
+    // Trigger asynchronous background processing (not awaited)
+    handleWebhookAsync(repo.id, repoUrl, sha, branch, eventType, repo.github_token).catch((err) => {
+      console.error('[Background Error] Failed to schedule webhook background processing:', err);
+    });
+
+    // Return 202 Accepted immediately to GitHub
     res.status(202).json({
       status: 'accepted',
-      message: 'GitHub webhook verified. Pipeline queueing is deferred to Phase 2 Day 2.',
+      message: 'GitHub webhook verified. Pipeline run creation has been triggered asynchronously.',
       data: {
         event: eventType,
         repository: repoUrl,
@@ -126,3 +131,63 @@ webhookRouter.post('/github', async (req: Request, res: Response, next: NextFunc
     next(error);
   }
 });
+
+/**
+ * Background worker to fetch pipeline YAML configuration and create a pending run transactionally.
+ */
+async function handleWebhookAsync(
+  repoId: string,
+  repoUrl: string,
+  sha: string,
+  branch: string,
+  trigger: string,
+  token?: string | null
+): Promise<void> {
+  try {
+    console.log(`[Background] Starting pipeline file retrieval for repo ${repoUrl} (Commit: ${sha})...`);
+
+    // 1. Parse repository owner and repo names
+    const { owner, repo } = parseGitHubUrl(repoUrl);
+
+    // 2. Fetch the pipeline YAML content from GitHub at the exact commit ref
+    const yamlContent = await fetchPipelineYaml(owner, repo, sha, token);
+
+    // 3. Database transaction: upsert workflow and create run
+    await db.transaction(async (trx) => {
+      // Extract workflow name from YAML if defined (e.g., "name: Build and Deploy")
+      const nameMatch = yamlContent.match(/^name:\s*(.+)$/m);
+      const workflowName = nameMatch ? nameMatch[1].trim().replace(/['"]/g, '') : repo;
+
+      // Upsert workflow config
+      const [workflow] = await trx('workflows')
+        .insert({
+          repo_id: repoId,
+          name: workflowName,
+          yaml_content: yamlContent,
+          updated_at: trx.fn.now(),
+        })
+        .onConflict(['repo_id', 'name'])
+        .merge({
+          yaml_content: yamlContent,
+          updated_at: trx.fn.now(),
+        })
+        .returning('*');
+
+      // Create new pending run record
+      const [newRun] = await trx('runs')
+        .insert({
+          workflow_id: workflow.id,
+          sha,
+          branch,
+          trigger,
+          status: 'pending',
+          created_at: trx.fn.now(),
+        })
+        .returning('*');
+
+      console.log(`[Background] Successfully created pending Run '${newRun.id}' for Workflow '${workflow.name}'`);
+    });
+  } catch (error: any) {
+    console.error(`[Background] Failed to process webhook for repo ${repoUrl} (Commit: ${sha}):`, error.message);
+  }
+}
