@@ -10,8 +10,17 @@ import { env } from './config/env';
 import { db, checkDatabaseConnection } from './storage/db';
 import { errorHandler, AppError } from './middleware/errors';
 
+// Import Routers
+import { webhookRouter } from './routes/webhook';
+import { reposRouter } from './routes/repos';
+import { secretsRouter } from './routes/secrets';
+
 const app = express();
 
+// 1. Raw body parsing for GitHub Webhook signature validation (must run before standard body parsers)
+app.use('/webhook', express.raw({ type: 'application/json' }));
+
+// 2. Swagger Configuration
 const swaggerOptions = {
   definition: {
     openapi: '3.0.0',
@@ -26,12 +35,17 @@ const swaggerOptions = {
 
 const swaggerDocs = swaggerJSDoc(swaggerOptions)
 
-// Standard middleware for security and request parsing
+// 3. Standard middleware for security and request parsing (JSON/Urlencoded)
 app.use(helmet());
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs))
+
+// 4. Mount API Routes
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
+app.use('/webhook', webhookRouter);
+app.use('/api/v1/repos', reposRouter);
+app.use('/api/v1/repos/:repoId/secrets', secretsRouter);
 
 /**
  * @openapi

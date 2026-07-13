@@ -1,0 +1,128 @@
+import { Router, Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
+import { db } from '../storage/db';
+import { AppError } from '../middleware/errors';
+
+export const webhookRouter = Router();
+
+/**
+ * Validates the GitHub HMAC-SHA256 signature using a timing-safe comparison.
+ */
+function verifySignature(payload: Buffer, signatureHeader: string, secret: string): boolean {
+  const expected = `sha256=${crypto
+    .createHmac('sha256', secret)
+    .update(payload)
+    .digest('hex')}`;
+  
+  const expectedBuffer = Buffer.from(expected);
+  const signatureBuffer = Buffer.from(signatureHeader);
+  
+  if (expectedBuffer.length !== signatureBuffer.length) {
+    return false;
+  }
+  
+  return crypto.timingSafeEqual(expectedBuffer, signatureBuffer);
+}
+
+/**
+ * @openapi
+ * /webhook/github:
+ *   post:
+ *     summary: GitHub Webhook endpoint
+ *     description: Ingests push or pull_request events, verifies payload signature, and schedules workflow execution.
+ *     headers:
+ *       X-Hub-Signature-256:
+ *         schema:
+ *           type: string
+ *         required: true
+ *         description: HMAC-SHA256 signature of the payload
+ *     responses:
+ *       200:
+ *         description: Webhook received. Event is not push/pull_request.
+ *       202:
+ *         description: Webhook received. Workflow run scheduled.
+ *       401:
+ *         description: Invalid signature.
+ *       404:
+ *         description: Repository not registered.
+ */
+webhookRouter.post('/github', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const signatureHeader = req.headers['x-hub-signature-256'];
+    if (!signatureHeader || typeof signatureHeader !== 'string') {
+      return next(new AppError('Missing X-Hub-Signature-256 header', 401));
+    }
+
+    // Check if the body is a raw Buffer (configured using express.raw() middleware in server.ts)
+    if (!Buffer.isBuffer(req.body)) {
+      return next(new AppError('Request body must be parsed as a raw Buffer for signature verification', 500));
+    }
+
+    const rawBody = req.body;
+    let payload: any;
+    
+    try {
+      payload = JSON.parse(rawBody.toString('utf-8'));
+    } catch (err) {
+      return next(new AppError('Invalid JSON payload', 400));
+    }
+
+    // Extract repository URL to lookup the registration
+    const repoUrl = payload.repository?.html_url;
+    if (!repoUrl) {
+      return next(new AppError('Repository URL missing in payload', 400));
+    }
+
+    // Look up repository registration in database
+    const repo = await db('repos').where({ github_repo_url: repoUrl }).first();
+    if (!repo) {
+      return next(new AppError(`Repository '${repoUrl}' is not registered`, 404));
+    }
+
+    // Verify HMAC-SHA256 signature
+    const isValid = verifySignature(rawBody, signatureHeader, repo.webhook_secret);
+    if (!isValid) {
+      return next(new AppError('Invalid signature. HMAC-SHA256 validation failed.', 401));
+    }
+
+    // Extract GitHub event type
+    const eventType = req.headers['x-github-event'];
+    if (eventType !== 'push' && eventType !== 'pull_request') {
+      console.log(`ℹ️ Webhook received for non-tracked event type: '${eventType}'`);
+      return res.status(200).json({
+        status: 'success',
+        message: `Webhook received but event type '${eventType}' is not processed.`,
+      });
+    }
+
+    // Extract basic information
+    let sha = '';
+    let branch = '';
+
+    if (eventType === 'push') {
+      sha = payload.after;
+      // Ref is in format refs/heads/branch_name
+      branch = payload.ref ? payload.ref.replace('refs/heads/', '') : 'unknown';
+    } else if (eventType === 'pull_request') {
+      sha = payload.pull_request?.head?.sha;
+      branch = payload.pull_request?.head?.ref || 'unknown';
+    }
+
+    console.log(`🚀 Webhook validated. Event: ${eventType}, Repository: ${repoUrl}, Commit: ${sha}, Branch: ${branch}`);
+
+    // TODO: In Day 2, we will trigger YAML fetching and BullMQ enqueuing.
+    // For Day 1, we return 202 indicating the webhook has been accepted.
+    res.status(202).json({
+      status: 'accepted',
+      message: 'GitHub webhook verified. Pipeline queueing is deferred to Phase 2 Day 2.',
+      data: {
+        event: eventType,
+        repository: repoUrl,
+        commit_sha: sha,
+        branch,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
