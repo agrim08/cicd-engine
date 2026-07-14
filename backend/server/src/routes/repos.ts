@@ -56,8 +56,9 @@ reposRouter.post('/', async (req, res, next) => {
       const parsed = parseGitHubUrl(github_repo_url);
       owner = parsed.owner;
       repo = parsed.repo;
-    } catch (err: any) {
-      return next(new AppError(err.message, 400));
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return next(new AppError(message, 400));
     }
 
     // Check if repository already exists in DB
@@ -70,10 +71,11 @@ reposRouter.post('/', async (req, res, next) => {
     let hasPipeline = false;
     try {
       hasPipeline = await checkPipelineFileExists(owner, repo, github_token);
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
       return next(
         new AppError(
-          `Unable to access GitHub repository. Please check repository URL or access token. Details: ${error.message}`,
+          `Unable to access GitHub repository. Please check repository URL or access token. Details: ${message}`,
           400
         )
       );
@@ -94,12 +96,13 @@ reposRouter.post('/', async (req, res, next) => {
     const host = req.get('host');
     const webhookUrl = `${protocol}://${host}/webhook/github`;
 
-    const responseData: any = {
-      id: newRepo.id,
-      github_repo_url: newRepo.github_repo_url,
+    const responseData = {
+      id: newRepo.id as string,
+      github_repo_url: newRepo.github_repo_url as string,
       webhook_url: webhookUrl,
-      webhook_secret: newRepo.webhook_secret,
-      created_at: newRepo.created_at,
+      webhook_secret: newRepo.webhook_secret as string,
+      created_at: newRepo.created_at as string,
+      warning: undefined as string | undefined,
     };
 
     if (!hasPipeline) {

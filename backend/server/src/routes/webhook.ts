@@ -6,6 +6,20 @@ import { parseGitHubUrl, fetchPipelineYaml } from '../github/api';
 
 export const webhookRouter = Router();
 
+interface GitHubWebhookPayload {
+  repository?: {
+    html_url?: string;
+  };
+  ref?: string;
+  after?: string;
+  pull_request?: {
+    head?: {
+      sha?: string;
+      ref?: string;
+    };
+  };
+}
+
 /**
  * Validates the GitHub HMAC-SHA256 signature using a timing-safe comparison.
  */
@@ -60,7 +74,7 @@ webhookRouter.post('/github', async (req: Request, res: Response, next: NextFunc
     }
 
     const rawBody = req.body;
-    let payload: any;
+    let payload: GitHubWebhookPayload;
     
     try {
       payload = JSON.parse(rawBody.toString('utf-8'));
@@ -101,11 +115,11 @@ webhookRouter.post('/github', async (req: Request, res: Response, next: NextFunc
     let branch = '';
 
     if (eventType === 'push') {
-      sha = payload.after;
+      sha = payload.after || '';
       // Ref is in format refs/heads/branch_name
       branch = payload.ref ? payload.ref.replace('refs/heads/', '') : 'unknown';
     } else if (eventType === 'pull_request') {
-      sha = payload.pull_request?.head?.sha;
+      sha = payload.pull_request?.head?.sha || '';
       branch = payload.pull_request?.head?.ref || 'unknown';
     }
 
@@ -187,7 +201,8 @@ async function handleWebhookAsync(
 
       console.log(`[Background] Successfully created pending Run '${newRun.id}' for Workflow '${workflow.name}'`);
     });
-  } catch (error: any) {
-    console.error(`[Background] Failed to process webhook for repo ${repoUrl} (Commit: ${sha}):`, error.message);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[Background] Failed to process webhook for repo ${repoUrl} (Commit: ${sha}):`, message);
   }
 }

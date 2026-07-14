@@ -53,7 +53,7 @@ const createSecretSchema = z.object({
  */
 secretsRouter.post('/', async (req, res, next) => {
   try {
-    const { repoId } = req.params as any;
+    const { repoId } = req.params as unknown as { repoId: string };
 
     const parseResult = createSecretSchema.safeParse(req.body);
     if (!parseResult.success) {
@@ -115,7 +115,7 @@ secretsRouter.post('/', async (req, res, next) => {
  */
 secretsRouter.get('/', async (req, res, next) => {
   try {
-    const { repoId } = req.params as any;
+    const { repoId } = req.params as unknown as { repoId: string };
 
     // Verify repository exists
     const repo = await db('repos').where({ id: repoId }).first();
@@ -163,7 +163,7 @@ secretsRouter.get('/', async (req, res, next) => {
  */
 secretsRouter.delete('/:name', async (req, res, next) => {
   try {
-    const { repoId, name } = req.params as any;
+    const { repoId, name } = req.params as unknown as { repoId: string; name: string };
 
     // Verify repository exists
     const repo = await db('repos').where({ id: repoId }).first();
