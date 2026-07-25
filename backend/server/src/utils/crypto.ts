@@ -3,7 +3,7 @@ import { env } from '../config/env';
 
 // Load and parse the 32-byte (64-character) hex encryption key
 const ENCRYPTION_KEY = Buffer.from(env.ENCRYPTION_KEY, 'hex');
-const IV_LENGTH = 12; // 12-byte (96-bit) IV is standard for AES-GCM
+const IV_LENGTH = 12; // 12-byte (96-bit) Initialization Vector (IV) is standard for AES-GCM
 const TAG_LENGTH = 16; // 16-byte (128-bit) authentication tag
 
 interface EncryptedData {
