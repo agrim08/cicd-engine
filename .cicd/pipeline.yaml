@@ -1,1 +1,25 @@
-testing
+name: Production Build Pipeline
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  GLOBAL_ENV_VAR: "production-mode"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20]
+        os: [ubuntu, macos]
+    steps:
+      - name: Checkout Repository
+        run: git clone https://github.com/agrim08/github-actions-clone .
+      - name: Install dependencies
+        run: npm ci
+      - name: Build Application
+        run: npm run build
+        if: success()
