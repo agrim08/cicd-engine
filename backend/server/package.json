@@ -16,6 +16,7 @@
     "@bull-board/api": "^8.3.0",
     "@bull-board/express": "^8.3.0",
     "@octokit/rest": "^22.0.1",
+    "axios": "^1.18.1",
     "bullmq": "^5.8.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
