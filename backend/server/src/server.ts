@@ -15,6 +15,13 @@ import { webhookRouter } from './routes/webhook';
 import { reposRouter } from './routes/repos';
 import { secretsRouter } from './routes/secrets';
 
+// Import Queue and BullBoard
+import { createBullBoard } from '@bull-board/api';
+import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
+import { ExpressAdapter } from '@bull-board/express';
+import { jobQueue } from './queue/manager';
+import './queue/processor'; // Load worker listeners
+
 const app = express();
 
 // 1. Raw body parsing for GitHub Webhook signature validation (must run before standard body parsers)
@@ -36,12 +43,25 @@ const swaggerOptions = {
 const swaggerDocs = swaggerJSDoc(swaggerOptions)
 
 // 3. Standard middleware for security and request parsing (JSON/Urlencoded)
-app.use(helmet());
+app.use(
+  helmet({
+    contentSecurityPolicy: false, // Disabled to allow BullBoard styles/assets to render in dashboard
+  })
+);
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// 4. Mount API Routes
+// 4. Setup BullBoard
+const serverAdapter = new ExpressAdapter();
+serverAdapter.setBasePath('/admin/queues');
+createBullBoard({
+  queues: [new BullMQAdapter(jobQueue)],
+  serverAdapter: serverAdapter,
+});
+
+// 5. Mount API Routes
+app.use('/admin/queues', serverAdapter.getRouter());
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
 app.use('/webhook', webhookRouter);
 app.use('/api/v1/repos', reposRouter);

@@ -3,6 +3,10 @@ import crypto from 'crypto';
 import { db } from '../storage/db';
 import { AppError } from '../middleware/errors';
 import { parseGitHubUrl, fetchPipelineYaml } from '../github/api';
+import { parseWorkflow } from '../executor/parser';
+import { isTriggerMatched } from '../executor/trigger';
+import { jobQueue } from '../queue/manager';
+import { ParsedJob } from '../executor/types';
 
 export const webhookRouter = Router();
 
@@ -166,17 +170,28 @@ async function handleWebhookAsync(
     // 2. Fetch the pipeline YAML content from GitHub at the exact commit ref
     const yamlContent = await fetchPipelineYaml(owner, repo, sha, token);
 
-    // 3. Database transaction: upsert workflow and create run
-    await db.transaction(async (trx) => {
-      // Extract workflow name from YAML if defined (e.g., "name: Build and Deploy")
-      const nameMatch = yamlContent.match(/^name:\s*(.+)$/m);
-      const workflowName = nameMatch ? nameMatch[1].trim().replace(/['"]/g, '') : repo;
+    // 3. Parse and validate the workflow YAML using our executor parser
+    const parsedWorkflow = parseWorkflow(yamlContent);
 
+    // 4. Validate if incoming event/branch matches the trigger settings
+    const eventType = trigger === 'push' || trigger === 'pull_request' ? trigger : 'push';
+    const isMatched = isTriggerMatched(parsedWorkflow, eventType, branch);
+
+    if (!isMatched) {
+      console.log(`[Background] Event branch '${branch}' does not match workflow triggers. Skipping execution.`);
+      return;
+    }
+
+    const jobsToEnqueue: { dbJobId: string; job: ParsedJob }[] = [];
+    let runId = '';
+
+    // 5. Database transaction: upsert workflow, run, and matrix-expanded jobs + steps
+    await db.transaction(async (trx) => {
       // Upsert workflow config
       const [workflow] = await trx('workflows')
         .insert({
           repo_id: repoId,
-          name: workflowName,
+          name: parsedWorkflow.name,
           yaml_content: yamlContent,
           updated_at: trx.fn.now(),
         })
@@ -199,8 +214,68 @@ async function handleWebhookAsync(
         })
         .returning('*');
 
-      console.log(`[Background] Successfully created pending Run '${newRun.id}' for Workflow '${workflow.name}'`);
+      runId = newRun.id;
+
+      // Insert expanded jobs and steps
+      for (const job of parsedWorkflow.jobs) {
+        const [dbJob] = await trx('jobs')
+          .insert({
+            run_id: runId,
+            name: job.name,
+            status: 'queued',
+            matrix_value: job.matrixValue ? job.matrixValue : null,
+            started_at: null,
+            completed_at: null,
+          })
+          .returning('*');
+
+        // Populate steps in correct order
+        for (const [index, step] of job.steps.entries()) {
+          await trx('steps').insert({
+            job_id: dbJob.id,
+            name: step.name,
+            status: 'pending',
+            exit_code: null,
+            duration_ms: null,
+            step_order: index,
+          });
+        }
+
+        jobsToEnqueue.push({ dbJobId: dbJob.id, job });
+      }
+
+      console.log(`[Background] Successfully created Run '${runId}' with ${parsedWorkflow.jobs.length} jobs.`);
     });
+
+    // 6. Enqueue jobs to BullMQ after database transaction succeeds
+    for (const item of jobsToEnqueue) {
+      // Extract required secret names from step runs (e.g. ${{ secrets.SECRET_NAME }})
+      const secretNames = new Set<string>();
+      for (const step of item.job.steps) {
+        const matches = step.run.match(/\$\{\{\s*secrets\.([A-Z_][A-Z0-9_]*)\s*\}\}/g);
+        if (matches) {
+          for (const match of matches) {
+            const secretName = match
+              .replace(/\$\{\{\s*secrets\./, '')
+              .replace(/\s*\}\}/, '')
+              .trim();
+            secretNames.add(secretName);
+          }
+        }
+      }
+
+      await jobQueue.add('execute-job', {
+        jobId: item.dbJobId,
+        runId,
+        repoId,
+        image: item.job.image,
+        steps: item.job.steps,
+        env: { ...parsedWorkflow.env, ...item.job.env },
+        secretNames: Array.from(secretNames),
+      });
+
+      console.log(`[Background] Enqueued job '${item.job.name}' (ID: ${item.dbJobId}) to BullMQ queue.`);
+    }
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[Background] Failed to process webhook for repo ${repoUrl} (Commit: ${sha}):`, message);
