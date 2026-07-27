@@ -452,22 +452,22 @@ docker-compose up -d
 
 ```bash
 npm install                     # root workspace
-cd backend && npm install
+cd backend/server && npm install
 cd ../runner && npm install
-cd ../client && npm install
+cd ../../client && npm install   # (if client directory is present)
 ```
 
 **4. Configure environment variables**
 
 ```bash
 cp .env.example .env
-# Fill in values — see Environment Variables section below
+# Fill in values — see Environment Variables section below (note: PORT should be set to 8080 to avoid reserved ranges)
 ```
 
 **5. Run database migrations**
 
 ```bash
-cd backend
+cd backend/server
 npm run migrate
 ```
 
@@ -475,19 +475,19 @@ npm run migrate
 
 ```bash
 # Terminal 1 — API server
-cd backend && npm run dev
+cd backend/server && npm run dev
 
 # Terminal 2 — Runner agent
-cd runner && npm run dev
+cd backend/runner && npm run dev
 
-# Terminal 3 — React dashboard
+# Terminal 3 — React dashboard (if client directory is present)
 cd client && npm run dev
 ```
 
 **7. Expose your webhook endpoint (for GitHub to reach your local server)**
 
 ```bash
-ngrok http 3000
+ngrok http 8080
 # Copy the HTTPS forwarding URL
 # Add it as a webhook in your GitHub repo settings:
 # Settings → Webhooks → Add webhook
@@ -527,7 +527,7 @@ AWS_SECRET_ACCESS_KEY=your_secret_access_key
 # S3_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com
 
 # ── Server ───────────────────────────────────────────────────
-PORT=3000
+PORT=8080
 NODE_ENV=development
 ```
 
@@ -694,12 +694,12 @@ This platform runs entirely on free-tier infrastructure at **$0/month**.
 # 1. Push to GitHub
 
 # 2. Create a Render Web Service
-#    Root dir: backend/
+#    Root dir: backend/server/
 #    Build: npm install && npm run build
 #    Start: npm start
 
 # 3. Create a Render Background Worker
-#    Root dir: runner/
+#    Root dir: backend/runner/
 #    Build: npm install && npm run build
 #    Start: npm start
 
