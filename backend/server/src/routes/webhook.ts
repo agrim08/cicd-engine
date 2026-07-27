@@ -265,13 +265,16 @@ async function handleWebhookAsync(
       }
 
       await jobQueue.add('execute-job', {
-        jobId: item.dbJobId,
-        runId,
-        repoId,
-        image: item.job.image,
-        steps: item.job.steps,
-        env: { ...parsedWorkflow.env, ...item.job.env },
-        secretNames: Array.from(secretNames),
+        type: 'execute-job',
+        payload: {
+          jobId: item.dbJobId,
+          runId,
+          repoId,
+          image: item.job.image,
+          steps: item.job.steps,
+          env: { ...parsedWorkflow.env, ...item.job.env },
+          secretNames: Array.from(secretNames),
+        },
       });
 
       console.log(`[Background] Enqueued job '${item.job.name}' (ID: ${item.dbJobId}) to BullMQ queue.`);

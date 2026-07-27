@@ -4,36 +4,118 @@ import * as dotenv from 'dotenv';
 // Load environment variables from the root .env file
 dotenv.config({ path: path.resolve(__dirname, '../../../../.env') });
 
-const RUNNER_NAME = process.env.RUNNER_NAME || 'runner-local-scaffold';
+const RUNNER_NAME = process.env.RUNNER_NAME || 'runner-local-agent';
+const PORT = process.env.PORT || '8080';
+const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
+const RUNNER_SHARED_SECRET = process.env.RUNNER_JWT_SECRET || 'default_jwt_secret_for_testing';
+
+let runnerId: string | null = null;
+let authToken: string | null = null;
+let heartbeatInterval: NodeJS.Timeout | null = null;
+
+interface RegisterResponse {
+  status: string;
+  data: {
+    runnerId: string;
+    name: string;
+    token: string;
+  };
+}
+
+interface HeartbeatResponse {
+  status: string;
+  message: string;
+}
+
+/**
+ * Registers the runner agent with the API server.
+ */
+async function registerRunner(): Promise<void> {
+  console.log(`🤖 [Runner] Registering with API Server at ${SERVER_URL}/api/v1/runners/register...`);
+
+  const response = await fetch(`${SERVER_URL}/api/v1/runners/register`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${RUNNER_SHARED_SECRET}`,
+    },
+    body: JSON.stringify({
+      name: RUNNER_NAME,
+      labels: ['ubuntu', 'docker', 'node'],
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Registration failed with status ${response.status}: ${errorText}`);
+  }
+
+  const result = (await response.json()) as RegisterResponse;
+  runnerId = result.data.runnerId;
+  authToken = result.data.token;
+
+  console.log(`🤖 [Runner] Registered successfully! Runner ID: ${runnerId}`);
+}
+
+/**
+ * Sends a heartbeat to the API server to maintain active status.
+ */
+async function sendHeartbeat(): Promise<void> {
+  if (!authToken) {
+    console.error('❌ [Runner] Heartbeat aborted: Auth token is missing.');
+    return;
+  }
+
+  try {
+    const response = await fetch(`${SERVER_URL}/api/v1/runners/heartbeat`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${authToken}`,
+      },
+    });
+
+    if (!response.ok) {
+      console.error(`❌ [Runner] Heartbeat failed with status ${response.status}`);
+      return;
+    }
+
+    const result = (await response.json()) as HeartbeatResponse;
+    console.log(`💓 [Runner] Heartbeat acknowledged: ${result.message}`);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`❌ [Runner] Heartbeat failed to connect:`, message);
+  }
+}
 
 /**
  * Runner Agent Bootstrap entry point.
- * Scaffolds the background daemon which will poll the server and execute jobs in Phase 3.
  */
 async function start() {
   console.log(`🤖 GitHub Actions Clone Runner [${RUNNER_NAME}] booting up...`);
-  console.log(`📡 Connecting to API Server at ${process.env.DATABASE_URL ? 'configured database' : 'local env'}`);
 
-  // Dummy polling heartbeat loop for Phase 1 scaffold
-  let loopCount = 0;
-  setInterval(() => {
-    loopCount++;
-    console.log(`💓 [Heartbeat #${loopCount}] Runner agent is idle. Ready to claim jobs.`);
-  }, 10000); // heartbeats every 10s
+  // 1. Register with the server
+  await registerRunner();
+
+  // 2. Start periodic heartbeat loop (every 30 seconds)
+  console.log('📡 Starting heartbeat pulse (every 30s)...');
+  await sendHeartbeat(); // Trigger immediately on start
+  heartbeatInterval = setInterval(sendHeartbeat, 30000);
 }
 
 // Handle termination gracefully
-process.on('SIGTERM', () => {
+function shutdown() {
   console.log('🤖 Shutting down runner gracefully...');
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+  }
   process.exit(0);
-});
+}
 
-process.on('SIGINT', () => {
-  console.log('🤖 Runner interrupted. Exiting...');
-  process.exit(0);
-});
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
 
-start().catch((err) => {
-  console.error('❌ Runner crashed during startup:', err);
+start().catch((err: unknown) => {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error('❌ Runner crashed during startup:', message);
   process.exit(1);
 });

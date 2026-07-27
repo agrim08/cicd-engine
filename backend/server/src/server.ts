@@ -14,12 +14,13 @@ import { errorHandler, AppError } from './middleware/errors';
 import { webhookRouter } from './routes/webhook';
 import { reposRouter } from './routes/repos';
 import { secretsRouter } from './routes/secrets';
+import { runnersRouter } from './routes/runners';
 
 // Import Queue and BullBoard
 import { createBullBoard } from '@bull-board/api';
 import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
 import { ExpressAdapter } from '@bull-board/express';
-import { jobQueue } from './queue/manager';
+import { jobQueue, registerSchedulerJobs } from './queue/manager';
 import './queue/processor'; // Load worker listeners
 
 const app = express();
@@ -66,6 +67,7 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
 app.use('/webhook', webhookRouter);
 app.use('/api/v1/repos', reposRouter);
 app.use('/api/v1/repos/:repoId/secrets', secretsRouter);
+app.use('/api/v1/runners', runnersRouter);
 
 /**
  * @openapi
@@ -148,7 +150,10 @@ async function bootstrap() {
       console.log(`✅ Database migrated successfully in batch ${batchNo}. Executed migrations:\n`, log.join('\n'));
     }
 
-    // 3. Bind the server to the port
+    // 3. Register BullMQ Schedulers
+    await registerSchedulerJobs();
+
+    // 4. Bind the server to the port
     app.listen(env.PORT, () => {
       console.log(`📡 Server running in [${env.NODE_ENV}] mode on port ${env.PORT}`);
     });
