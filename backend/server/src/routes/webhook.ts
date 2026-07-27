@@ -224,6 +224,8 @@ async function handleWebhookAsync(
             name: job.name,
             status: 'queued',
             matrix_value: job.matrixValue ? job.matrixValue : null,
+            image: job.image || 'ubuntu-latest',
+            env: JSON.stringify(job.env || {}),
             started_at: null,
             completed_at: null,
           })
@@ -238,6 +240,9 @@ async function handleWebhookAsync(
             exit_code: null,
             duration_ms: null,
             step_order: index,
+            run: step.run,
+            env: JSON.stringify(step.env || {}),
+            condition: step.condition,
           });
         }
 

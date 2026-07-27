@@ -27,6 +27,28 @@ interface HeartbeatResponse {
   message: string;
 }
 
+interface ClaimResponse {
+  status: string;
+  data: {
+    jobId: string;
+    runId: string;
+    image: string;
+    env: Record<string, string>;
+    steps: Array<{
+      id: string;
+      name: string;
+      status: string;
+      step_order: number;
+      run: string;
+      env: Record<string, string>;
+      condition: string | null;
+    }>;
+    secrets: Record<string, string>;
+  };
+}
+
+let isExecuting = false;
+
 /**
  * Registers the runner agent with the API server.
  */
@@ -88,6 +110,64 @@ async function sendHeartbeat(): Promise<void> {
 }
 
 /**
+ * Periodically requests queued jobs from the API server using atomic locking (SKIP LOCKED).
+ */
+async function claimLoop(): Promise<void> {
+  if (isExecuting || !authToken) return;
+
+  try {
+    const response = await fetch(`${SERVER_URL}/api/v1/runners/claim`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${authToken}`,
+      },
+    });
+
+    if (response.status === 204) {
+      // No jobs available, sleep and poll again
+      setTimeout(claimLoop, 5000);
+      return;
+    }
+
+    if (!response.ok) {
+      console.error(`❌ [Runner] Job claim failed with status ${response.status}`);
+      setTimeout(claimLoop, 5000);
+      return;
+    }
+
+    const result = (await response.json()) as ClaimResponse;
+    const job = result.data;
+
+    isExecuting = true;
+    console.log(`\n📥 [Runner] Claimed Job: '${job.jobId}'`);
+    console.log(`🐳 Target Docker Image: ${job.image}`);
+    console.log(`🔐 Decrypted Secrets:`, Object.keys(job.secrets));
+    console.log(`🔧 Environment:`, job.env);
+    console.log(`🏃 Steps:`);
+    job.steps.forEach((step) => {
+      console.log(`   - Step #${step.step_order + 1}: ${step.name}`);
+      console.log(`     Command: "${step.run}"`);
+      if (step.condition) {
+        console.log(`     Condition: "${step.condition}"`);
+      }
+    });
+
+    // Simulate job execution for Phase 4 Part 2 verification
+    console.log('\n⚡ [Runner] Simulating step executions (5s)...');
+    setTimeout(() => {
+      console.log(`✅ [Runner] Simulation complete for Job '${job.jobId}'. Resuming claim loop.`);
+      isExecuting = false;
+      claimLoop();
+    }, 5000);
+
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`❌ [Runner] Claim request failed to connect:`, message);
+    setTimeout(claimLoop, 5000);
+  }
+}
+
+/**
  * Runner Agent Bootstrap entry point.
  */
 async function start() {
@@ -100,6 +180,10 @@ async function start() {
   console.log('📡 Starting heartbeat pulse (every 30s)...');
   await sendHeartbeat(); // Trigger immediately on start
   heartbeatInterval = setInterval(sendHeartbeat, 30000);
+
+  // 3. Launch job claim polling loop
+  console.log('📡 Starting job claim loop (polling every 5s when idle)...');
+  claimLoop();
 }
 
 // Handle termination gracefully
