@@ -806,7 +806,7 @@ MIT © [Agrim](https://github.com/agrim08)
 
 <div align="center">
 
-Built by [Agrim](https://github.com/agrim08) — B.Tech CS @ JSSATE Noida · Core Member, Google Developer Group
+Built by [Agrim](https://github.com/agrim08) — B.Tech CS @ JSSATE Noida · SDE @DentalStack
 
 **If this helped you understand how CI/CD works under the hood, consider starring ⭐ the repo.**
 
