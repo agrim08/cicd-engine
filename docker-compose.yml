@@ -22,7 +22,7 @@ services:
     image: redis:7-alpine
     container_name: github-actions-clone-redis
     ports:
-      - "6379:6379"
+      - "6700:6379"
     volumes:
       - redisdata:/data
     healthcheck:
