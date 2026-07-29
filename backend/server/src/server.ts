@@ -15,6 +15,7 @@ import { webhookRouter } from './routes/webhook';
 import { reposRouter } from './routes/repos';
 import { secretsRouter } from './routes/secrets';
 import { runnersRouter } from './routes/runners';
+import { jobsRouter } from './routes/jobs';
 
 // Import Queue and BullBoard
 import { createBullBoard } from '@bull-board/api';
@@ -28,7 +29,6 @@ const app = express();
 // 1. Raw body parsing for GitHub Webhook signature validation (must run before standard body parsers)
 app.use('/webhook', express.raw({ type: 'application/json' }));
 
-// 2. Swagger Configuration
 const swaggerOptions = {
   definition: {
     openapi: '3.0.0',
@@ -36,6 +36,18 @@ const swaggerOptions = {
       title: 'GitHub Actions Clone API',
       version: '1.0.0',
       description: 'API documentation for GitHub Actions Clone',
+    },
+    components: {
+      securitySchemes: {
+        bearerAuth: {
+          type: 'http',
+          scheme: 'bearer',
+        },
+        regAuth: {
+          type: 'http',
+          scheme: 'bearer',
+        },
+      },
     },
   },
   apis: [path.join(__dirname, '**/*.{ts,js}').replace(/\\/g, '/')],
@@ -68,6 +80,7 @@ app.use('/webhook', webhookRouter);
 app.use('/api/v1/repos', reposRouter);
 app.use('/api/v1/repos/:repoId/secrets', secretsRouter);
 app.use('/api/v1/runners', runnersRouter);
+app.use('/api/v1/jobs', jobsRouter);
 
 /**
  * @openapi

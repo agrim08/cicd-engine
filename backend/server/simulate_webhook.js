@@ -5,7 +5,7 @@ const axios = require('axios');
 // Load env configuration from workspace
 require('dotenv').config({ path: 'd:/Github-Actions-Clone/.env' });
 
-const REPO_URL = 'https://github.com/agrim08/github-actions-clone';
+const REPO_URL = 'https://github.com/agrim08/cicd-engine';
 
 async function run() {
   const dbUrl = process.env.DATABASE_URL;
@@ -16,14 +16,14 @@ async function run() {
 
   console.log('📡 Connecting to local PostgreSQL database to retrieve webhook secret...');
   const client = new Client({ connectionString: dbUrl });
-  
+
   try {
     await client.connect();
-    
+
     // 1. Fetch the registered repository
     const res = await client.query('SELECT * FROM repos WHERE github_repo_url = $1', [REPO_URL]);
     const repo = res.rows[0];
-    
+
     if (!repo) {
       console.log(`\n⚠️  Repository '${REPO_URL}' is not registered yet.`);
       console.log(`Please register it first by sending a POST request to:`);
@@ -31,30 +31,30 @@ async function run() {
       console.log(`Body: { "github_repo_url": "${REPO_URL}" }\n`);
       process.exit(1);
     }
-    
+
     const secret = repo.webhook_secret;
     console.log(`✅ Webhook secret retrieved: ${secret}`);
-    
+
     // 2. Prepare mock GitHub Push webhook payload
     // Note: We use a commit SHA that exists or is dummy
     const payload = {
       ref: 'refs/heads/main',
-      after: 'f5468b3b44ba0f84b23b9e8660896d08600a8277',
+      after: 'be9b0b4e32e1a7553f4206b243c2753c8a911cc4',
       repository: {
         html_url: REPO_URL
       }
     };
-    
+
     const rawBody = JSON.stringify(payload);
-    
+
     // 3. Compute HMAC-SHA256 signature
     const signature = 'sha256=' + crypto
       .createHmac('sha256', secret)
       .update(rawBody)
       .digest('hex');
-      
+
     console.log(`🔑 Computed HMAC Signature: ${signature}`);
-    
+
     // 4. Send POST request to local API server
     const port = process.env.PORT || 3000;
     console.log(`🚀 Sending simulated GitHub webhook push event to /webhook/github on port ${port}...`);
@@ -65,12 +65,12 @@ async function run() {
         'content-type': 'application/json'
       }
     });
-    
+
     console.log('\n📥 Response Received:');
     console.log(`Status Code: ${response.status} ${response.statusText}`);
     console.log('Body:', JSON.stringify(response.data, null, 2));
     console.log('\n🎉 Simulation successful! Check server logs to verify queueing.');
-    
+
   } catch (error) {
     if (error.response) {
       console.error('\n❌ Webhook rejected by server:');

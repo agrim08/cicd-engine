@@ -21,12 +21,8 @@ const registerRunnerSchema = z.object({
  *   post:
  *     summary: Register a new runner agent
  *     description: Creates a runner record in the database and returns a unique auth token.
- *     headers:
- *       Authorization:
- *         schema:
- *           type: string
- *         required: true
- *         description: Bearer registration token (matching RUNNER_JWT_SECRET)
+ *     security:
+ *       - regAuth: []
  *     requestBody:
  *       required: true
  *       content:
@@ -112,12 +108,8 @@ runnersRouter.post('/register', async (req, res, next) => {
  *   post:
  *     summary: Update runner heartbeat status
  *     description: Sets the last_heartbeat timestamp and updates runner status to idle.
- *     headers:
- *       Authorization:
- *         schema:
- *           type: string
- *         required: true
- *         description: Bearer runner authentication token
+ *     security:
+ *       - bearerAuth: []
  *     responses:
  *       200:
  *         description: Heartbeat updated successfully.
@@ -154,12 +146,8 @@ runnersRouter.post('/heartbeat', runnerAuth, async (req: RunnerRequest, res: Res
  *   post:
  *     summary: Claim a queued job atomically
  *     description: Lock the oldest queued job in a transaction, transition statuses, decrypt repository secrets, and return the execution payload.
- *     headers:
- *       Authorization:
- *         schema:
- *           type: string
- *         required: true
- *         description: Bearer runner authentication token
+ *     security:
+ *       - bearerAuth: []
  *     responses:
  *       200:
  *         description: Job claimed successfully. Returns execution payload.
