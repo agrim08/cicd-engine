@@ -1,5 +1,7 @@
 import * as path from 'path';
 import * as dotenv from 'dotenv';
+import Docker from 'dockerode';
+import { Writable } from 'stream';
 
 // Load environment variables from the root .env file
 dotenv.config({ path: path.resolve(__dirname, '../../../../.env') });
@@ -12,6 +14,7 @@ const RUNNER_SHARED_SECRET = process.env.RUNNER_JWT_SECRET || 'default_jwt_secre
 let runnerId: string | null = null;
 let authToken: string | null = null;
 let heartbeatInterval: NodeJS.Timeout | null = null;
+const docker = new Docker();
 
 interface RegisterResponse {
   status: string;
@@ -27,27 +30,61 @@ interface HeartbeatResponse {
   message: string;
 }
 
+interface Step {
+  id: string;
+  name: string;
+  status: string;
+  step_order: number;
+  run: string;
+  env: Record<string, string>;
+  condition: string | null;
+}
+
+interface Job {
+  jobId: string;
+  runId: string;
+  image: string;
+  env: Record<string, string>;
+  steps: Step[];
+  secrets: Record<string, string>;
+}
+
 interface ClaimResponse {
   status: string;
-  data: {
-    jobId: string;
-    runId: string;
-    image: string;
-    env: Record<string, string>;
-    steps: Array<{
-      id: string;
-      name: string;
-      status: string;
-      step_order: number;
-      run: string;
-      env: Record<string, string>;
-      condition: string | null;
-    }>;
-    secrets: Record<string, string>;
-  };
+  data: Job;
 }
 
 let isExecuting = false;
+
+/**
+ * Custom writable stream parser to split buffer chunks into individual log lines.
+ */
+class LogStream extends Writable {
+  private buffer = '';
+  private onLine: (line: string) => void;
+
+  constructor(onLine: (line: string) => void) {
+    super();
+    this.onLine = onLine;
+  }
+
+  _write(chunk: Buffer, _encoding: string, callback: (error?: Error | null) => void): void {
+    this.buffer += chunk.toString('utf8');
+    const lines = this.buffer.split(/\r?\n/);
+    this.buffer = lines.pop() || '';
+    for (const line of lines) {
+      this.onLine(line);
+    }
+    callback();
+  }
+
+  _final(callback: (error?: Error | null) => void): void {
+    if (this.buffer) {
+      this.onLine(this.buffer);
+    }
+    callback();
+  }
+}
 
 /**
  * Registers the runner agent with the API server.
@@ -110,6 +147,261 @@ async function sendHeartbeat(): Promise<void> {
 }
 
 /**
+ * Updates step execution status, duration, and exit code on the API server.
+ */
+async function updateStepStatus(
+  jobId: string,
+  stepId: string,
+  status: 'pending' | 'running' | 'success' | 'failed',
+  exitCode?: number,
+  durationMs?: number
+): Promise<void> {
+  if (!authToken) return;
+  try {
+    await fetch(`${SERVER_URL}/api/v1/jobs/${jobId}/steps/${stepId}/status`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${authToken}`,
+      },
+      body: JSON.stringify({ status, exitCode, durationMs }),
+    });
+  } catch (error: unknown) {
+    console.error('❌ [Runner] Failed to update step status:', error instanceof Error ? error.message : String(error));
+  }
+}
+
+/**
+ * Updates the job status and final exit code on the API server.
+ */
+async function updateJobStatus(
+  jobId: string,
+  status: 'running' | 'success' | 'failed' | 'cancelled' | 'timeout',
+  exitCode?: number
+): Promise<void> {
+  if (!authToken) return;
+  try {
+    await fetch(`${SERVER_URL}/api/v1/jobs/${jobId}/status`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${authToken}`,
+      },
+      body: JSON.stringify({ status, exitCode }),
+    });
+  } catch (error: unknown) {
+    console.error('❌ [Runner] Failed to update job status:', error instanceof Error ? error.message : String(error));
+  }
+}
+
+/**
+ * Sends a single log line to the API server for database persistence.
+ */
+async function postLog(jobId: string, stepId: string, lineNo: number, content: string): Promise<void> {
+  if (!authToken) return;
+  try {
+    await fetch(`${SERVER_URL}/api/v1/jobs/${jobId}/logs`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${authToken}`,
+      },
+      body: JSON.stringify({ stepId, lineNo, content }),
+    });
+  } catch (error: unknown) {
+    console.error('❌ [Runner] Failed to post log line:', error instanceof Error ? error.message : String(error));
+  }
+}
+
+/**
+ * Replaces occurrences of `${{ secrets.KEY }}` and `__SECRET:KEY__` with decrypted values.
+ */
+function resolveSecrets(command: string, secrets: Record<string, string>): string {
+  let resolved = command;
+  for (const [key, value] of Object.entries(secrets)) {
+    const regex = new RegExp(`\\$\\{\\{\\s*secrets\\.${key}\\s*\\}\\}`, 'gi');
+    resolved = resolved.replace(regex, value);
+    resolved = resolved.replace(new RegExp(`__SECRET:${key}__`, 'g'), value);
+  }
+  return resolved;
+}
+
+/**
+ * Evaluates whether a step should execute based on its condition and the previous steps state.
+ */
+function shouldRunStep(condition: string | null, previousStepStatus: 'success' | 'failed'): boolean {
+  if (!condition) {
+    return previousStepStatus === 'success';
+  }
+  const normalized = condition.trim().toLowerCase();
+  if (normalized === 'success()') {
+    return previousStepStatus === 'success';
+  }
+  if (normalized === 'failure()') {
+    return previousStepStatus === 'failed';
+  }
+  if (normalized === 'always()') {
+    return true;
+  }
+  return previousStepStatus === 'success';
+}
+
+/**
+ * Ensures the target Docker image is present locally, pulling it if necessary.
+ */
+async function ensureImageExists(imageName: string): Promise<void> {
+  console.log(`🐳 [Docker] Checking local availability of '${imageName}'...`);
+  try {
+    await docker.getImage(imageName).inspect();
+    console.log(`🐳 [Docker] Image '${imageName}' is already available locally.`);
+  } catch {
+    console.log(`🐳 [Docker] Image '${imageName}' not found. Pulling...`);
+    await new Promise<void>((resolve, reject) => {
+      docker.pull(imageName, {}, (err, stream) => {
+        if (err) return reject(err);
+        if (!stream) return reject(new Error('No stream returned from docker pull'));
+        docker.modem.followProgress(stream, (finishedErr) => {
+          if (finishedErr) return reject(finishedErr);
+          resolve();
+        });
+      });
+    });
+    console.log(`🐳 [Docker] Image '${imageName}' pulled successfully.`);
+  }
+}
+
+/**
+ * Dispatches step commands inside the container.
+ */
+async function executeStep(container: Docker.Container, step: Step, jobId: string, secrets: Record<string, string>): Promise<void> {
+  console.log(`⚡ [Runner] Starting step: ${step.name}`);
+  await updateStepStatus(jobId, step.id, 'running');
+  const startTime = Date.now();
+
+  const resolvedRun = resolveSecrets(step.run, secrets);
+
+  const exec = await container.exec({
+    Cmd: ['sh', '-c', resolvedRun],
+    AttachStdout: true,
+    AttachStderr: true,
+  });
+
+  const stream = await exec.start({});
+  let lineNo = 0;
+
+  const stdoutParser = new LogStream((line) => {
+    lineNo++;
+    console.log(`[Job ${jobId}][Stdout] ${line}`);
+    postLog(jobId, step.id, lineNo, line);
+  });
+
+  const stderrParser = new LogStream((line) => {
+    lineNo++;
+    console.warn(`[Job ${jobId}][Stderr] ${line}`);
+    postLog(jobId, step.id, lineNo, `[stderr] ${line}`);
+  });
+
+  container.modem.demuxStream(stream, stdoutParser, stderrParser);
+
+  await new Promise<void>((resolve, reject) => {
+    stream.on('end', () => resolve());
+    stream.on('error', (err) => reject(err));
+  });
+
+  const inspectResult = await exec.inspect();
+  const exitCode = inspectResult.ExitCode ?? -1;
+  const duration = Date.now() - startTime;
+
+  console.log(`⚡ [Runner] Step '${step.name}' finished with exit code: ${exitCode} (${duration}ms)`);
+
+  const finalStatus = exitCode === 0 ? 'success' : 'failed';
+  await updateStepStatus(jobId, step.id, finalStatus, exitCode, duration);
+
+  if (exitCode !== 0) {
+    throw new Error(`Step '${step.name}' failed with exit code ${exitCode}`);
+  }
+}
+
+/**
+ * Handles container creation, setup, sequential step execution, and cleanup.
+ */
+async function executeJob(job: Job): Promise<void> {
+  await updateJobStatus(job.jobId, 'running');
+
+  // Normalize image name (fallback to ubuntu if ubuntu-latest is supplied)
+  const normalizedImage = job.image === 'ubuntu-latest' ? 'ubuntu:latest' : job.image;
+
+  let container: Docker.Container | null = null;
+  try {
+    await ensureImageExists(normalizedImage);
+
+    // Build environment variable bindings
+    const envArray = [
+      ...Object.entries(job.env).map(([k, v]) => `${k}=${v}`),
+      ...Object.entries(job.secrets).map(([k, v]) => `${k}=${v}`),
+      'CI=true',
+    ];
+
+    console.log(`🐳 [Docker] Creating container using image: ${normalizedImage}...`);
+    container = await docker.createContainer({
+      Image: normalizedImage,
+      Cmd: ['sleep', 'infinity'],
+      Env: envArray,
+      HostConfig: {
+        Memory: 512 * 1024 * 1024,
+        CpuPeriod: 100000,
+        CpuQuota: 100000,
+        NetworkMode: 'bridge',
+        Binds: ['/var/run/docker.sock:/var/run/docker.sock'],
+      },
+      WorkingDir: '/workspace',
+    });
+
+    await container.start();
+    console.log(`🐳 [Docker] Container started successfully.`);
+
+    let previousStepStatus: 'success' | 'failed' = 'success';
+
+    for (const step of job.steps) {
+      if (shouldRunStep(step.condition, previousStepStatus)) {
+        try {
+          await executeStep(container, step, job.jobId, job.secrets);
+          previousStepStatus = 'success';
+        } catch {
+          previousStepStatus = 'failed';
+        }
+      } else {
+        console.log(`⏭️ [Runner] Skipping step: ${step.name} due to condition block.`);
+        await updateStepStatus(job.jobId, step.id, 'pending'); // Leave pending/skipped
+      }
+    }
+
+    const finalStatus = previousStepStatus === 'success' ? 'success' : 'failed';
+    await updateJobStatus(job.jobId, finalStatus, previousStepStatus === 'success' ? 0 : 1);
+    console.log(`🏁 [Runner] Job '${job.jobId}' finished with status: ${finalStatus}`);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`❌ [Runner] Job execution crashed:`, message);
+    await updateJobStatus(job.jobId, 'failed', 1);
+  } finally {
+    if (container) {
+      console.log(`🐳 [Docker] Stopping and removing container...`);
+      try {
+        await container.stop();
+      } catch {
+        // Safe to ignore if already stopped
+      }
+      try {
+        await container.remove({ force: true });
+      } catch (err: unknown) {
+        console.error('❌ [Docker] Failed to remove container:', err instanceof Error ? err.message : String(err));
+      }
+      console.log(`🐳 [Docker] Container cleanup completed.`);
+    }
+  }
+}
+
+/**
  * Periodically requests queued jobs from the API server using atomic locking (SKIP LOCKED).
  */
 async function claimLoop(): Promise<void> {
@@ -124,7 +416,6 @@ async function claimLoop(): Promise<void> {
     });
 
     if (response.status === 204) {
-      // No jobs available, sleep and poll again
       setTimeout(claimLoop, 5000);
       return;
     }
@@ -140,26 +431,11 @@ async function claimLoop(): Promise<void> {
 
     isExecuting = true;
     console.log(`\n📥 [Runner] Claimed Job: '${job.jobId}'`);
-    console.log(`🐳 Target Docker Image: ${job.image}`);
-    console.log(`🔐 Decrypted Secrets:`, Object.keys(job.secrets));
-    console.log(`🔧 Environment:`, job.env);
-    console.log(`🏃 Steps:`);
-    job.steps.forEach((step) => {
-      console.log(`   - Step #${step.step_order + 1}: ${step.name}`);
-      console.log(`     Command: "${step.run}"`);
-      if (step.condition) {
-        console.log(`     Condition: "${step.condition}"`);
-      }
-    });
 
-    // Simulate job execution for Phase 4 Part 2 verification
-    console.log('\n⚡ [Runner] Simulating step executions (5s)...');
-    setTimeout(() => {
-      console.log(`✅ [Runner] Simulation complete for Job '${job.jobId}'. Resuming claim loop.`);
-      isExecuting = false;
-      claimLoop();
-    }, 5000);
+    await executeJob(job);
 
+    isExecuting = false;
+    setTimeout(claimLoop, 1000);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`❌ [Runner] Claim request failed to connect:`, message);
@@ -170,24 +446,21 @@ async function claimLoop(): Promise<void> {
 /**
  * Runner Agent Bootstrap entry point.
  */
-async function start() {
+async function start(): Promise<void> {
   console.log(`🤖 GitHub Actions Clone Runner [${RUNNER_NAME}] booting up...`);
 
-  // 1. Register with the server
   await registerRunner();
 
-  // 2. Start periodic heartbeat loop (every 30 seconds)
   console.log('📡 Starting heartbeat pulse (every 30s)...');
-  await sendHeartbeat(); // Trigger immediately on start
+  await sendHeartbeat();
   heartbeatInterval = setInterval(sendHeartbeat, 30000);
 
-  // 3. Launch job claim polling loop
   console.log('📡 Starting job claim loop (polling every 5s when idle)...');
   claimLoop();
 }
 
 // Handle termination gracefully
-function shutdown() {
+function shutdown(): void {
   console.log('🤖 Shutting down runner gracefully...');
   if (heartbeatInterval) {
     clearInterval(heartbeatInterval);

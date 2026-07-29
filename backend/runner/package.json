@@ -10,9 +10,11 @@
     "start": "node dist/agent.js"
   },
   "dependencies": {
+    "dockerode": "^5.0.1",
     "dotenv": "^16.4.5"
   },
   "devDependencies": {
+    "@types/dockerode": "^4.0.1",
     "@types/node": "^20.14.9",
     "nodemon": "^3.1.4",
     "ts-node": "^10.9.2",
