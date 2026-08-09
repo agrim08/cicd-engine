@@ -195,21 +195,66 @@ async function updateJobStatus(
 }
 
 /**
- * Sends a single log line to the API server for database persistence.
+ * Buffers log lines and posts them to the API server in batches to prevent database write bottlenecks.
  */
-async function postLog(jobId: string, stepId: string, lineNo: number, content: string): Promise<void> {
-  if (!authToken) return;
-  try {
-    await fetch(`${SERVER_URL}/api/v1/jobs/${jobId}/logs`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${authToken}`,
-      },
-      body: JSON.stringify({ stepId, lineNo, content }),
+class LogBuffer {
+  private jobId: string;
+  private buffer: Array<{ stepId: string | null; lineNo: number; content: string }> = [];
+  private flushTimeout: NodeJS.Timeout | null = null;
+  private maxBatchSize = 50;
+  private flushIntervalMs = 2000;
+
+  constructor(jobId: string) {
+    this.jobId = jobId;
+  }
+
+  public push(stepId: string | null, lineNo: number, content: string): void {
+    this.buffer.push({ stepId, lineNo, content });
+
+    if (this.buffer.length >= this.maxBatchSize) {
+      this.flush();
+    } else if (!this.flushTimeout) {
+      this.flushTimeout = setTimeout(() => {
+        this.flush();
+      }, this.flushIntervalMs);
+    }
+  }
+
+  public flush(): void {
+    if (this.flushTimeout) {
+      clearTimeout(this.flushTimeout);
+      this.flushTimeout = null;
+    }
+
+    if (this.buffer.length === 0) return;
+
+    const batch = [...this.buffer];
+    this.buffer = [];
+
+    this.sendBatch(batch).catch((err: unknown) => {
+      console.error('❌ [LogBuffer] Async log push failed:', err);
     });
-  } catch (error: unknown) {
-    console.error('❌ [Runner] Failed to post log line:', error instanceof Error ? error.message : String(error));
+  }
+
+  private async sendBatch(batch: Array<{ stepId: string | null; lineNo: number; content: string }>): Promise<void> {
+    if (!authToken) return;
+    try {
+      const response = await fetch(`${SERVER_URL}/api/v1/jobs/${this.jobId}/logs`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`,
+        },
+        body: JSON.stringify(batch),
+      });
+
+      if (!response.ok) {
+        console.error(`❌ [LogBuffer] Failed to post log batch, server responded: ${response.status}`);
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('❌ [LogBuffer] Failed to connect to server to post log batch:', message);
+    }
   }
 }
 
@@ -273,7 +318,13 @@ async function ensureImageExists(imageName: string): Promise<void> {
 /**
  * Dispatches step commands inside the container.
  */
-async function executeStep(container: Docker.Container, step: Step, jobId: string, secrets: Record<string, string>): Promise<void> {
+async function executeStep(
+  container: Docker.Container,
+  step: Step,
+  jobId: string,
+  secrets: Record<string, string>,
+  logBuffer: LogBuffer
+): Promise<void> {
   console.log(`⚡ [Runner] Starting step: ${step.name}`);
   await updateStepStatus(jobId, step.id, 'running');
   const startTime = Date.now();
@@ -292,13 +343,13 @@ async function executeStep(container: Docker.Container, step: Step, jobId: strin
   const stdoutParser = new LogStream((line) => {
     lineNo++;
     console.log(`[Job ${jobId}][Stdout] ${line}`);
-    postLog(jobId, step.id, lineNo, line);
+    logBuffer.push(step.id, lineNo, line);
   });
 
   const stderrParser = new LogStream((line) => {
     lineNo++;
     console.warn(`[Job ${jobId}][Stderr] ${line}`);
-    postLog(jobId, step.id, lineNo, `[stderr] ${line}`);
+    logBuffer.push(step.id, lineNo, `[stderr] ${line}`);
   });
 
   container.modem.demuxStream(stream, stdoutParser, stderrParser);
@@ -307,6 +358,9 @@ async function executeStep(container: Docker.Container, step: Step, jobId: strin
     stream.on('end', () => resolve());
     stream.on('error', (err) => reject(err));
   });
+
+  // Flush log lines immediately at the end of the step execution
+  logBuffer.flush();
 
   const inspectResult = await exec.inspect();
   const exitCode = inspectResult.ExitCode ?? -1;
@@ -332,6 +386,7 @@ async function executeJob(job: Job): Promise<void> {
   const normalizedImage = job.image === 'ubuntu-latest' ? 'ubuntu:latest' : job.image;
 
   let container: Docker.Container | null = null;
+  const logBuffer = new LogBuffer(job.jobId);
   try {
     await ensureImageExists(normalizedImage);
 
@@ -365,7 +420,7 @@ async function executeJob(job: Job): Promise<void> {
     for (const step of job.steps) {
       if (shouldRunStep(step.condition, previousStepStatus)) {
         try {
-          await executeStep(container, step, job.jobId, job.secrets);
+          await executeStep(container, step, job.jobId, job.secrets, logBuffer);
           previousStepStatus = 'success';
         } catch {
           previousStepStatus = 'failed';
@@ -384,6 +439,9 @@ async function executeJob(job: Job): Promise<void> {
     console.error(`❌ [Runner] Job execution crashed:`, message);
     await updateJobStatus(job.jobId, 'failed', 1);
   } finally {
+    if (logBuffer) {
+      logBuffer.flush();
+    }
     if (container) {
       console.log(`🐳 [Docker] Stopping and removing container...`);
       try {
