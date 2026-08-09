@@ -3,7 +3,8 @@
   "private": true,
   "workspaces": [
     "backend/server",
-    "backend/runner"
+    "backend/runner",
+    "frontend"
   ],
   "scripts": {
     "dev:server": "npm run dev --workspace=backend/server",
