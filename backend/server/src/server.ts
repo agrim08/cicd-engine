@@ -4,6 +4,9 @@ import helmet from 'helmet';
 import * as path from 'path';
 import swaggerJSDoc from 'swagger-jsdoc';
 import swaggerUi from 'swagger-ui-express';
+import { createServer } from 'http';
+import { Server, Socket } from 'socket.io';
+import { redisSubscriber } from './storage/redisSubscriber';
 
 // Import environment configuration first to trigger Zod validation early
 import { env } from './config/env';
@@ -25,6 +28,61 @@ import { jobQueue, registerSchedulerJobs } from './queue/manager';
 import './queue/processor'; // Load worker listeners
 
 const app = express();
+const httpServer = createServer(app);
+const io = new Server(httpServer, {
+  cors: {
+    origin: '*',
+  },
+});
+
+// Configure Socket.IO log streaming
+io.on('connection', (socket: Socket) => {
+  console.log(`🔌 Socket client connected: ${socket.id}`);
+
+  socket.on('subscribe:logs', async (jobId: string) => {
+    console.log(`🔌 Socket ${socket.id} subscribed to job logs: ${jobId}`);
+    const roomName = `job:${jobId}`;
+    socket.join(roomName);
+
+    try {
+      await redisSubscriber.subscribe(`job:${jobId}:logs`);
+    } catch (err) {
+      console.error(`❌ Failed to subscribe redisSubscriber to channel job:${jobId}:logs:`, err);
+    }
+  });
+
+  socket.on('unsubscribe:logs', async (jobId: string) => {
+    console.log(`🔌 Socket ${socket.id} unsubscribed from job logs: ${jobId}`);
+    const roomName = `job:${jobId}`;
+    socket.leave(roomName);
+
+    const clients = io.sockets.adapter.rooms.get(roomName);
+    if (!clients || clients.size === 0) {
+      try {
+        await redisSubscriber.unsubscribe(`job:${jobId}:logs`);
+      } catch (err) {
+        console.error(`❌ Failed to unsubscribe redisSubscriber from channel job:${jobId}:logs:`, err);
+      }
+    }
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`🔌 Socket client disconnected: ${socket.id}`);
+  });
+});
+
+// Forward pub/sub messages from Redis to matching Socket.IO rooms
+redisSubscriber.on('message', (channel, message) => {
+  const matches = channel.match(/^job:(.+):logs$/);
+  if (matches) {
+    const jobId = matches[1];
+    try {
+      io.to(`job:${jobId}`).emit('logs:line', JSON.parse(message));
+    } catch (err) {
+      console.error(`❌ Error parsing or emitting log pub/sub message for job ${jobId}:`, err);
+    }
+  }
+});
 
 // 1. Raw body parsing for GitHub Webhook signature validation (must run before standard body parsers)
 app.use('/webhook', express.raw({ type: 'application/json' }));
@@ -167,7 +225,7 @@ async function bootstrap() {
     await registerSchedulerJobs();
 
     // 4. Bind the server to the port
-    app.listen(env.PORT, () => {
+    httpServer.listen(env.PORT, () => {
       console.log(`📡 Server running in [${env.NODE_ENV}] mode on port ${env.PORT}`);
     });
   } catch (error) {
